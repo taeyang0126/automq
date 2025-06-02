@@ -126,6 +126,8 @@ public class DefaultS3Client implements Client {
 
     @Override
     public void start() {
+        // config.refillPeriodMs() 表示 每次填充的时间间隔
+        // 表示每 config.refillPeriodMs() 时间填充 token 的数量
         long refillToken = (long) (config.networkBaselineBandwidth() * ((double) config.refillPeriodMs() / 1000));
         if (refillToken <= 0) {
             throw new IllegalArgumentException(String.format("refillToken must be greater than 0, bandwidth: %d, refill period: %dms",
@@ -163,6 +165,7 @@ public class DefaultS3Client implements Client {
         this.objectManager.setCommitStreamSetObjectHook(localIndexCache::updateIndexFromRequest);
         this.blockCache = new StreamReaders(this.config.blockCacheSize(), objectManager, mainObjectStorage, objectReaderFactory);
         this.compactionManager = new CompactionManager(this.config, this.objectManager, this.streamManager, backgroundObjectStorage);
+        // 构建 WAL，开源版本默认使用 S3 进行构建
         this.writeAheadLog = buildWAL();
         this.storageFailureHandlerChain = new StorageFailureHandlerChain();
         this.storage = newS3Storage();
@@ -210,7 +213,9 @@ public class DefaultS3Client implements Client {
 
     protected WriteAheadLog buildWAL() {
         String clusterId = brokerServer.clusterId();
+        // 默认的 WalHandle，主要用来测试 storage 的权限问题
         WalHandle walHandle = new DefaultWalHandle(clusterId);
+        // walFactory
         WalFactory factory = new DefaultWalFactory(config.nodeId(), config.objectTagging(), networkInboundLimiter, networkOutboundLimiter);
         return new BootstrapWalV1(config.nodeId(), config.nodeEpoch(), config.walConfig(), false, factory, getNodeManager(), walHandle);
     }

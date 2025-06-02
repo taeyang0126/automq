@@ -80,6 +80,7 @@ public class WALUtil {
     public static int crc32(ByteBuf buf, int length) {
         CRC32 crc32 = new CRC32();
         ByteBuf slice = buf.slice(buf.readerIndex(), length);
+        // 直接操作底层数据，不需要进行拷贝
         for (ByteBuffer buffer : slice.nioBuffers()) {
             crc32.update(buffer);
         }

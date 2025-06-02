@@ -50,7 +50,9 @@ public class AsyncNetworkBandwidthLimiter implements NetworkBandwidthLimiter {
     private final ExecutorService callbackThreadPool;
     private final Queue<BucketItem> queuedCallbacks;
     private final Type type;
+    // 记录每次填充 token 的数量
     private final long tokenSize;
+    // 记录可用的 token 数量
     private long availableTokens;
 
     public AsyncNetworkBandwidthLimiter(Type type, long tokenSize, int refillIntervalMs) {
@@ -67,7 +69,9 @@ public class AsyncNetworkBandwidthLimiter implements NetworkBandwidthLimiter {
         this.refillThreadPool =
             Threads.newSingleThreadScheduledExecutor(new DefaultThreadFactory("refill-bucket-thread"), LOGGER);
         this.callbackThreadPool = Threads.newFixedFastThreadLocalThreadPoolWithMonitor(1, "callback-thread", true, LOGGER);
+        // 启动任务
         this.callbackThreadPool.execute(this::run);
+        // 启动任务，每次间隔 refillIntervalMs 填充 tokenSize 数量的 token，最大不能超过 maxTokens
         this.refillThreadPool.scheduleAtFixedRate(this::refillToken, refillIntervalMs, refillIntervalMs, TimeUnit.MILLISECONDS);
         S3StreamMetricsManager.registerNetworkLimiterQueueSizeSupplier(type, this::getQueueSize);
         LOGGER.info("AsyncNetworkBandwidthLimiter initialized, type: {}, tokenSize: {}, maxTokens: {}, refillIntervalMs: {}",
@@ -78,14 +82,18 @@ public class AsyncNetworkBandwidthLimiter implements NetworkBandwidthLimiter {
         while (true) {
             lock.lock();
             try {
+                // 没有异步任务，直接 await
                 while (!ableToConsume()) {
                     condition.await();
                 }
+                // 当可用的 token 大于 0 时，开始处理
+                // 因为有 refillToken 任务在跑着，所以 availableTokens 是在增加的，直到 maxTokens
                 while (ableToConsume()) {
                     BucketItem head = queuedCallbacks.peek();
                     if (head == null) {
                         break;
                     }
+                    // 每次最多尝试消费 1M 的数据，如果消费完了，那么将这个数据 CompletableFuture 设置为 finish，同时从队列中删除
                     long size = Math.min(head.size, MAX_TOKEN_PART_SIZE);
                     reduceToken(size);
                     if (head.complete(size)) {
@@ -155,15 +163,19 @@ public class AsyncNetworkBandwidthLimiter implements NetworkBandwidthLimiter {
 
     public CompletableFuture<Void> consume(ThrottleStrategy throttleStrategy, long size) {
         CompletableFuture<Void> cf = new CompletableFuture<>();
+        // 完成后记录 metrics
         cf.whenComplete((v, e) -> NetworkStats.getInstance().networkUsageTotalStats(type, throttleStrategy).add(MetricsLevel.INFO, size));
         if (Objects.requireNonNull(throttleStrategy) == ThrottleStrategy.BYPASS) {
+            // 强制消费
             forceConsume(size);
             cf.complete(null);
         } else {
             lock.lock();
             try {
+                // 没有可用的 token 或者已经有排队的请求了，添加到异步队列中
                 if (availableTokens <= 0 || !queuedCallbacks.isEmpty()) {
                     queuedCallbacks.offer(new BucketItem(throttleStrategy, size, cf));
+                    // 唤醒异步消费任务
                     condition.signalAll();
                 } else {
                     reduceToken(size);
@@ -196,6 +208,7 @@ public class AsyncNetworkBandwidthLimiter implements NetworkBandwidthLimiter {
     }
 
     private static class BucketItem implements Comparable<BucketItem> {
+        // 策略，数字越小优先级越高
         private final ThrottleStrategy strategy;
         private final CompletableFuture<Void> cf;
         private final long timestamp;

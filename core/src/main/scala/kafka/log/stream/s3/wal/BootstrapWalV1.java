@@ -91,6 +91,7 @@ public class BootstrapWalV1 implements WriteAheadLog {
             }
 
             currentWalConfigs = oldNodeMetadata.getWalConfig();
+            // 构建 wal
             this.wal = buildRecoverWal(currentWalConfigs, nodeEpoch).get();
         } catch (Throwable e) {
             throw new AutoMQException(e);
@@ -163,8 +164,10 @@ public class BootstrapWalV1 implements WriteAheadLog {
 
     private CompletableFuture<? extends WriteAheadLog> buildRecoverWal(String kraftWalConfigs, long oldNodeEpoch) {
         IdURI uri = IdURI.parse(kraftWalConfigs);
+        // 1. 首先验证下 storage 是否可用，就是通过 uri 构造了 ObjectStorage，然后写入一个 ByteBuf 进行测试
         CompletableFuture<Void> cf = walHandle
             .acquirePermission(nodeId, oldNodeEpoch, uri, new WalHandle.AcquirePermissionOptions().failoverMode(failoverMode));
+        // 2. 测试完成后构造一个 WriteAheadLog
         return cf.thenApplyAsync(nil -> factory.build(uri, BuildOptions.builder().nodeEpoch(oldNodeEpoch).failoverMode(failoverMode).build()), executor);
     }
 

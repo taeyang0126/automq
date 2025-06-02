@@ -51,9 +51,11 @@ public class DefaultWalFactory implements WalFactory {
     @Override
     public WriteAheadLog build(IdURI uri, BuildOptions options) {
         //noinspection SwitchStatementWithTooFewBranches
+        // 开源版本目前 WAL 只支持 S3
         switch (uri.protocol().toUpperCase(Locale.ENGLISH)) {
             case "S3":
                 BucketURI bucketURI = to(uri);
+                // 构造 AwsObjectStorage
                 ObjectStorage walObjectStorage = ObjectStorageFactory.instance()
                     .builder(bucketURI)
                     .tagging(objectTagging)
@@ -67,6 +69,8 @@ public class DefaultWalFactory implements WalFactory {
                     .withEpoch(options.nodeEpoch())
                     .withFailover(options.failoverMode());
 
+                // 构建以 S3 作为 WAL 的服务
+                // 底层存储使用 AwsObjectStorage
                 return new ObjectWALService(Time.SYSTEM, walObjectStorage, configBuilder.build());
             default:
                 throw new IllegalArgumentException("Unsupported WAL protocol: " + uri.protocol());

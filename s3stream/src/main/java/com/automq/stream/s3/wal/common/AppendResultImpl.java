@@ -25,6 +25,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 public final class AppendResultImpl implements AppendResult {
+    // 这里的 recordOffset 是数据写入的 offset，也就是最开始的 offset
     private final long recordOffset;
     private final CompletableFuture<CallbackResult> future;
 

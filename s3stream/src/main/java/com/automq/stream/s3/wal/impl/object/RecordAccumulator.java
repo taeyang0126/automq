@@ -77,8 +77,10 @@ public class RecordAccumulator implements Closeable {
     protected final ObjectStorage objectStorage;
     protected final ReservationService reservationService;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    // 记录上传中的 WAL 记录，key=offset value=单批次上传的记录列表
     private final ConcurrentNavigableMap<Long /* inclusive first offset */, UploadTask> uploadMap = new ConcurrentSkipListMap<>();
     private final ConcurrentNavigableMap<Pair<Long /* epoch */, Long /* exclusive end offset */>, WALObject> previousObjectMap = new ConcurrentSkipListMap<>();
+    // 存放已经上传到 S3 的 WAL 记录，key=endOffset 猜测是用来做追尾读的缓存？
     private final ConcurrentNavigableMap<Long /* exclusive end offset */, WALObject> objectMap = new ConcurrentSkipListMap<>();
     private final String nodePrefix;
     private final String objectPrefix;
@@ -87,13 +89,18 @@ public class RecordAccumulator implements Closeable {
     private final ExecutorService callbackService;
     private final ConcurrentMap<CompletableFuture<Void>, Long> pendingFutureMap = new ConcurrentHashMap<>();
     private final AtomicLong objectDataBytes = new AtomicLong();
+    // 在内存中，没有 apply 到 S3 的 WAL 数据字节大小
     private final AtomicLong bufferedDataBytes = new AtomicLong();
     protected volatile boolean closed = true;
     protected volatile boolean fenced;
+    // 内存中存放数据，这些数据表示没有 apply 到存储的 WAL record
     private final ConcurrentLinkedDeque<Record> bufferQueue = new ConcurrentLinkedDeque<>();
     private volatile long lastUploadTimestamp = System.currentTimeMillis();
+    // 下个消息的 offset，这里是物理的 offset
     private final AtomicLong nextOffset = new AtomicLong();
+    // 已经刷新到底层存储结构中的 offset，在这个 offset 之前的数据已经安全的上传到了底层的存储结构中，可以删除掉
     private final AtomicLong flushedOffset = new AtomicLong();
+    // 记录删除的 offset，这里的删除指的是删除已经上传到 S3 的数据
     private final AtomicLong trimOffset = new AtomicLong(-1);
 
     public RecordAccumulator(Time time, ObjectStorage objectStorage, ReservationService reservationService,
@@ -124,6 +131,7 @@ public class RecordAccumulator implements Closeable {
                 }
             })
             .join();
+        // 初始化时从 S3 中读取出所有的 WAL 对象并存放在 ObjectMap 中，用来做追尾读
         objectStorage.list(nodePrefix)
             .thenAccept(objectList -> objectList.forEach(object -> {
                 String path = object.key();
@@ -167,7 +175,7 @@ public class RecordAccumulator implements Closeable {
         flushedOffset.set(objectMap.isEmpty() ? 0 : objectMap.lastKey());
         nextOffset.set(flushedOffset.get());
 
-        // Trigger upload periodically.
+        // 触发定期上传
         executorService.scheduleWithFixedDelay(() -> {
             long startTime = time.nanoseconds();
             if (fenced
@@ -319,6 +327,8 @@ public class RecordAccumulator implements Closeable {
 
     private boolean shouldUpload() {
         Record firstRecord = bufferQueue.peekFirst();
+        // bufferQueue 表示添加到内存中还没有开始上传到 S3 的 WAL 对象
+        // uploadMap 表示在上传过程中的 WAL 对象
         if (firstRecord == null || uploadMap.size() >= config.maxInflightUploadCount()) {
             return false;
         }
@@ -333,14 +343,17 @@ public class RecordAccumulator implements Closeable {
         checkWriteStatus();
 
         // Check if there is too much data in the S3 WAL.
+        // config.maxUnflushedBytes() 默认是 1GB
         if (nextOffset.get() - flushedOffset.get() > config.maxUnflushedBytes()) {
             throw new OverCapacityException("Too many unflushed bytes.", true);
         }
 
+        // objectMap 表示已经上传到 S3 的 WAL 对象 + 正在上传的 WAL 对象不能超过 3000
         if (objectMap.size() + config.maxInflightUploadCount() >= 3000) {
             throw new OverCapacityException("Too many WAL objects.", false);
         }
 
+        // 达到刷新条件上传到对象存储
         if (shouldUpload() && lock.writeLock().tryLock()) {
             try {
                 if (time.nanoseconds() - startTime > DEFAULT_LOCK_WARNING_TIMEOUT) {
@@ -372,6 +385,7 @@ public class RecordAccumulator implements Closeable {
                 ObjectWALMetricsManager.recordOperationLatency(time.nanoseconds() - acquireAppendLockTime, "append", throwable == null);
             });
 
+            // 将记录添加到 bufferQueue 中
             bufferQueue.offer(new Record(offset, recordSupplier.apply(offset), future));
             bufferedDataBytes.addAndGet(recordSize);
 
@@ -469,6 +483,7 @@ public class RecordAccumulator implements Closeable {
         }
 
         int size = bufferQueue.size();
+        // 根据 offset 排序的优先级队列
         PriorityQueue<Record> recordQueue = new PriorityQueue<>(size, Comparator.comparingLong(o -> o.offset));
 
         for (int i = 0; i < size; i++) {
@@ -492,6 +507,8 @@ public class RecordAccumulator implements Closeable {
         CompositeByteBuf dataBuffer = ByteBufAlloc.compositeByteBuffer();
         List<Record> recordList = new LinkedList<>();
 
+        // 快速判断一个 S3 object 是否包含完整的第一条消息，其实可以从 header 中读取到消息大小，这里是为了性能考虑？
+        // 减少解码的开销？
         long stickyRecordLength = 0;
         if (!recordQueue.isEmpty()) {
             Record firstRecord = recordQueue.peek();
@@ -502,6 +519,7 @@ public class RecordAccumulator implements Closeable {
 
         while (!recordQueue.isEmpty()) {
             // The retained bytes in the batch must larger than record header size.
+            // 严格模式下，剩余的大小肯定要大于一条消息的头，不然头都不完整，整条消息就没法读了
             long retainedBytesInBatch = config.maxBytesInBatch() - dataBuffer.readableBytes() - WALObjectHeader.DEFAULT_WAL_HEADER_SIZE;
             if (config.strictBatchLimit() && retainedBytesInBatch <= RecordHeader.RECORD_HEADER_SIZE) {
                 break;
@@ -510,6 +528,7 @@ public class RecordAccumulator implements Closeable {
             Record record = recordQueue.poll();
 
             // Records larger than the batch size will be uploaded immediately.
+            // 如果一条消息大小都超过单个批次容量的大小，直接上传上去，保证一个批次中起码一条消息是完整的
             assert record != null;
             if (config.strictBatchLimit() && record.record.readableBytes() >= config.maxBytesInBatch() - WALObjectHeader.DEFAULT_WAL_HEADER_SIZE) {
                 dataBuffer.addComponent(true, record.record);
@@ -517,6 +536,7 @@ public class RecordAccumulator implements Closeable {
                 break;
             }
 
+            // 严格模式下，如果这条消息的数据大小大于剩余可以上传的大小，则需要进行切片
             if (config.strictBatchLimit() && record.record.readableBytes() > retainedBytesInBatch) {
                 // The records will be split into multiple objects.
                 ByteBuf slice = record.record.retainedSlice(0, (int) retainedBytesInBatch).asReadOnly();
@@ -550,7 +570,9 @@ public class RecordAccumulator implements Closeable {
 
         // Enable fast retry.
         ObjectStorage.WriteOptions writeOptions = new ObjectStorage.WriteOptions().enableFastRetry(true);
+        // {objectPrefix}/{startOffset}-{endOffset}
         String path = String.format(OBJECT_PATH_FORMAT, objectPrefix, firstOffset, endOffset);
+        // 利用底层的 storage 存储 WAL 对象
         CompletableFuture<ObjectStorage.WriteResult> uploadFuture = objectStorage.write(writeOptions, path, objectBuffer);
 
         CompletableFuture<Void> finalFuture = recordUploadMetrics(uploadFuture, startTime, objectLength)
@@ -656,8 +678,10 @@ public class RecordAccumulator implements Closeable {
     }
 
     protected static class Record {
+        // 这里的 record 是包含 header 的
         public final ByteBuf record;
         public final CompletableFuture<AppendResult.CallbackResult> future;
+        // 这里的 offset 表示这条消息的写入位置，也就是消息最开始的 offset
         public long offset;
 
         public Record(long offset, ByteBuf record,

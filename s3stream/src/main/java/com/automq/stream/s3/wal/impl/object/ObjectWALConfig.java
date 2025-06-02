@@ -24,9 +24,13 @@ import com.automq.stream.utils.IdURI;
 import org.apache.commons.lang3.StringUtils;
 
 public class ObjectWALConfig {
+    // 将 WAL 批量存储的时间间隔，默认是 256ms
     private final long batchInterval;
+    // 将 WAL 批量存储的字节大小，默认是 8MB 会上传一次
     private final long maxBytesInBatch;
+    // 在 WAL 中最大的未刷新到对象存储的字节大小，默认是 1GB
     private final long maxUnflushedBytes;
+    // 上传到存储过程中的最大 WAL 对象数量
     private final int maxInflightUploadCount;
     private final int readAheadObjectCount;
     private final String clusterId;
@@ -34,6 +38,7 @@ public class ObjectWALConfig {
     private final long epoch;
     private final boolean failover;
     private final short bucketId;
+    // 严格模式，如果加入新消息会超过限制，就立即发送当前批次
     private final boolean strictBatchLimit;
 
     public static Builder builder() {

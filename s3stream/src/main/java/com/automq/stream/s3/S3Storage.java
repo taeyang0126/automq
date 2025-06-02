@@ -97,16 +97,20 @@ public class S3Storage implements Storage {
     private static final FastReadFailFastException FAST_READ_FAIL_FAST_EXCEPTION = new FastReadFailFastException();
 
     private static final int NUM_STREAM_CALLBACK_LOCKS = 128;
+    // 允许的最大未apply数据量
     private final long maxDeltaWALCacheSize;
     protected final Config config;
     private final WriteAheadLog deltaWAL;
     /**
      * WAL log cache
+     * 已写入WAL但还未apply到存储层的数据
      */
     private final LogCache deltaWALCache;
     private final LogCache snapshotReadCache;
     /**
-     * WAL out of order callback sequencer. {@link #streamCallbackLocks} will ensure the memory safety.
+     * WAL out of order callback sequencer.
+     * {@link #streamCallbackLocks}
+     * will ensure the memory safety.
      */
     private final WALCallbackSequencer callbackSequencer = new WALCallbackSequencer();
     private final WALConfirmOffsetCalculator confirmOffsetCalculator = new WALConfirmOffsetCalculator();
@@ -481,6 +485,7 @@ public class S3Storage implements Storage {
         // encoded before append to free heap ByteBuf.
         streamRecord.encoded();
         WalWriteRequest writeRequest = new WalWriteRequest(streamRecord, -1L, cf, context);
+        // 先添加到 stream 对应的 queue 里面，queue 保证顺序
         handleAppendRequest(writeRequest);
         append0(context, writeRequest, false);
         return cf.whenComplete((nil, ex) -> {
@@ -516,10 +521,13 @@ public class S3Storage implements Storage {
         try {
             try {
                 StreamRecordBatch streamRecord = request.record;
+                // 这里需要 retain，因为前面在 append 之前有个 whenComplete，里面会释放这个引用
                 streamRecord.retain();
                 Lock lock = confirmOffsetCalculator.addLock();
                 lock.lock();
                 try {
+                    // append 到 WAL
+                    // 这里的 deltaWAL 实际就是 ObjectWALService，开源版本默认使用 S3 实现的 WAL
                     appendResult = deltaWAL.append(new TraceContext(context), streamRecord.encoded());
                 } finally {
                     lock.unlock();
@@ -747,6 +755,7 @@ public class S3Storage implements Storage {
                 waitingAckRequest.confirmed = true;
                 if (full) {
                     // cache block is full, trigger WAL upload.
+                    // 缓存满了，触发 WAL 上传
                     uploadDeltaWAL();
                 }
             }

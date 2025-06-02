@@ -23,6 +23,7 @@ import com.automq.stream.s3.metrics.TimerUtil;
 import com.automq.stream.s3.network.AsyncNetworkBandwidthLimiter;
 import com.automq.stream.s3.network.ThrottleStrategy;
 
+import org.apache.commons.lang3.time.StopWatch;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -77,6 +78,9 @@ public class AsyncNetworkBandwidthLimiterTest {
 
     @Test
     public void testThrottleConsume3() {
+        StopWatch stopWatch = new StopWatch();
+        stopWatch.start();
+
         AsyncNetworkBandwidthLimiter bucket = new AsyncNetworkBandwidthLimiter(AsyncNetworkBandwidthLimiter.Type.INBOUND, 10, 1000);
         CompletableFuture<Void> cf = bucket.consume(ThrottleStrategy.BYPASS, 20);
         Assertions.assertEquals(-10, bucket.getAvailableTokens());
@@ -89,6 +93,16 @@ public class AsyncNetworkBandwidthLimiterTest {
         });
         cf.join();
         result.join();
+        stopWatch.stop();
+        long executionTime = stopWatch.getTime();
+
+        // 时间断言
+        // 因为消耗了30单位，速率是10单位/秒，所以至少需要2秒
+        Assertions.assertTrue(executionTime >= 2000,
+            "Execution time should be at least 2000ms but was " + executionTime + "ms");
+        // 设置一个上限，比如不应该超过2.5秒
+        Assertions.assertTrue(executionTime <= 2500,
+            "Execution time should not exceed 2500ms but was " + executionTime + "ms");
     }
 
     @Test
@@ -153,6 +167,7 @@ public class AsyncNetworkBandwidthLimiterTest {
         AsyncNetworkBandwidthLimiter bucket = new AsyncNetworkBandwidthLimiter(AsyncNetworkBandwidthLimiter.Type.INBOUND, 1024 * 1024, 1000);
         bucket.consume(ThrottleStrategy.BYPASS, 1024 * 1024);
         Assertions.assertEquals(0, bucket.getAvailableTokens());
+        // 优先级问题 COMPACTION 比 CATCH_UP 优先级高，所以 cf 会先被消费
         CompletableFuture<Void> cf2 = bucket.consume(ThrottleStrategy.CATCH_UP, 5 * 1024 * 1024);
         CompletableFuture<Void> cf = bucket.consume(ThrottleStrategy.COMPACTION, 5 * 1024 * 1024);
         TimerUtil timerUtil = new TimerUtil();
@@ -178,5 +193,20 @@ public class AsyncNetworkBandwidthLimiterTest {
             Assertions.assertTrue(bypassCf.isDone());
         });
         result.join();
+    }
+
+    @Test
+    public void testThrottleConsumeFuture() {
+        AsyncNetworkBandwidthLimiter bucket = new AsyncNetworkBandwidthLimiter(AsyncNetworkBandwidthLimiter.Type.INBOUND, 1024 * 1024, 100);
+        bucket.consume(ThrottleStrategy.CATCH_UP, 1024 * 1024);
+        Assertions.assertEquals(0, bucket.getAvailableTokens());
+        CompletableFuture<Void> cf = bucket.consume(ThrottleStrategy.CATCH_UP, 5 * 1024 * 1024);
+        TimerUtil timerUtil = new TimerUtil();
+        cf.whenComplete((v, e) -> {
+            Assertions.assertNull(e);
+            Assertions.assertEquals(0, bucket.getAvailableTokens());
+            Assertions.assertTrue(timerUtil.elapsedAs(TimeUnit.MILLISECONDS) <= 600);
+        });
+        cf.join();
     }
 }

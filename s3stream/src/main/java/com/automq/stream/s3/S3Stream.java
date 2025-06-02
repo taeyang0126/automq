@@ -187,6 +187,7 @@ public class S3Stream implements Stream, StreamMetadataListener {
         readLock.lock();
         try {
             CompletableFuture<AppendResult> cf = exec(() -> {
+                // 流控
                 if (networkInboundLimiter != null) {
                     networkInboundLimiter.consume(ThrottleStrategy.BYPASS, recordBatch.rawPayload().remaining());
                 }
@@ -214,9 +215,11 @@ public class S3Stream implements Stream, StreamMetadataListener {
         if (!status.isWritable()) {
             return FutureUtil.failedFuture(new StreamClientException(ErrorCode.STREAM_ALREADY_CLOSED, logIdent + "stream is not writable"));
         }
+        // 这里的 offset 是逻辑意义上的 offset，表示第 n 个消息
         long offset = nextOffset.getAndAdd(recordBatch.count());
         StreamRecordBatch streamRecordBatch = new StreamRecordBatch(streamId, epoch, offset, recordBatch.count(), Unpooled.wrappedBuffer(recordBatch.rawPayload()));
         CompletableFuture<AppendResult> cf = storage.append(context, streamRecordBatch).thenApply(nil -> {
+            // 更新 confirmOffset
             updateConfirmOffset(offset + recordBatch.count());
             return new DefaultAppendResult(offset);
         });

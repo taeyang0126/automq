@@ -84,4 +84,17 @@ public class BucketURITest {
         bucket = BucketURI.parse(bucketStr);
         assertEquals("bucket+1", bucket.bucket());
     }
+
+    @Test
+    public void testParseBucket_2() {
+        String bucketStr = "0@s3://bucket1?region=region1&k1=v1&k2=v2&k2=v22&endpoint=https://aws.amazon.com:444";
+        BucketURI bucketURI = BucketURI.parse(bucketStr);
+        assertEquals(0, bucketURI.bucketId());
+        assertEquals("s3", bucketURI.protocol());
+        assertEquals("bucket1", bucketURI.bucket());
+        assertEquals("region1", bucketURI.region());
+        assertEquals("https://aws.amazon.com:444", bucketURI.endpoint());
+        assertEquals("v1", bucketURI.extensionString("k1"));
+        assertEquals(List.of("v2", "v22"), bucketURI.extensionStringList("k2"));
+    }
 }

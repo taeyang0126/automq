@@ -72,6 +72,7 @@ public class ObjectWALService implements WriteAheadLog {
     protected RecordAccumulator accumulator;
 
     public ObjectWALService(Time time, ObjectStorage objectStorage, ObjectWALConfig config) {
+        // 这里的 objectStorage = AwsObjectStorage
         this.objectStorage = objectStorage;
         this.config = config;
 
@@ -109,6 +110,7 @@ public class ObjectWALService implements WriteAheadLog {
 
         final CompletableFuture<AppendResult.CallbackResult> appendResultFuture = new CompletableFuture<>();
         try {
+            // 记录大小 头大小+数据可读大小
             final long recordSize = RECORD_HEADER_SIZE + data.readableBytes();
 
             long expectedWriteOffset = accumulator.append(recordSize, start -> {
